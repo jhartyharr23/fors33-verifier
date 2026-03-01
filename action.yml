@@ -1,0 +1,30 @@
+# FORS33 Data Provenance Check — verify data integrity in CI/CD.
+# Fails the job (exit 1) on hash mismatch. Zero-trust; no file uploads to this action.
+name: 'FORS33 Data Provenance Check'
+description: 'Verify file or URL segment against a SHA-256 hash. Fails the job on mismatch.'
+branding:
+  icon: shield-check
+  color: blue
+inputs:
+  url:
+    description: 'HTTPS URL to download and verify (presigned URL). Do not use for sensitive data.'
+    required: false
+  file:
+    description: 'Path to local file (in runner) to verify'
+    required: false
+  expected-hash:
+    description: 'Expected SHA-256 hex digest'
+    required: true
+  record:
+    description: 'Path to attestation record JSON (overrides start/end/hash when provided)'
+    required: false
+  start:
+    description: 'Start byte offset for segment verification'
+    required: false
+  end:
+    description: 'End byte offset for segment verification'
+    required: false
+# Exit code: 0 = verified, 1 = mismatch (fails job), 2 = error. No outputs from container.
+runs:
+  using: 'docker'
+  image: 'docker://ghcr.io/jhartyharr23/fors33-verifier:latest'
