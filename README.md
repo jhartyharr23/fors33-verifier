@@ -72,9 +72,9 @@ docker run --rm ghcr.io/jhartyharr23/fors33-verifier:latest --url "https://..." 
 docker run --rm docker.io/fors33/verifier:latest --file /data/file.csv --expected-hash <sha256>
 ```
 
-## URL-only API (App Platform)
+## URL-only API
 
-For a hosted API that verifies **presigned URLs only** (no file uploads), run the image with the `serve` command. See [APP_PLATFORM.md](APP_PLATFORM.md). In-browser verification must use the **Web Crypto API** client-side; the file never leaves the user's machine.
+For a hosted API that verifies **presigned URLs only** (no file uploads), run the image with the `serve` command. In-browser verification must use the **Web Crypto API** client-side; the file never leaves the user's machine.
 
 ## Requirements
 
