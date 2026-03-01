@@ -18,6 +18,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check Docker Hub secret
+        run: |
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "::error::DOCKERHUB_USERNAME secret is not set. Add it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          if [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "::error::DOCKERHUB_TOKEN secret is not set. Add it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          echo "Docker Hub username is set (secret not shown)."
+
       - name: Set version and tags
         id: meta
         run: |
@@ -55,5 +67,3 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/fors33-verifier:latest
             ${{ steps.meta.outputs.dh_image }}
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/verifier:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
