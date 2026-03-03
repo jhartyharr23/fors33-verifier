@@ -2,9 +2,12 @@
 """
 Minimal HTTP API for URL-only verification. No file uploads.
 POST /verify with JSON: {"url": "https://...", "expected_hash": "..."}
+or {"url": "https://...", "expected_hash": "...", "start": 0, "end": 1024}.
+Returns 200 + {"verified": true/false} or 4xx/5xx.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,7 +16,7 @@ def get_app():
     try:
         from flask import Flask, request, jsonify
     except ImportError:
-        sys.exit("flask is required; pip install flask")
+        sys.exit("flask is required for server_url_only.py; pip install flask")
 
     app = Flask(__name__)
 

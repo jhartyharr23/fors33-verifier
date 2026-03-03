@@ -9,6 +9,7 @@ description = "Verify attested data segments. Standalone SHA-256 verification fo
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
+dependencies = ["cryptography>=41.0"]
 authors = [{name = "FORS33"}]
 keywords = ["verification", "sha256", "data-provenance", "attestation"]
 classifiers = [

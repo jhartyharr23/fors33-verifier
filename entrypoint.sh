@@ -1,8 +1,10 @@
 #!/bin/sh
-# GitHub Action: inputs in INPUT_* env vars. Otherwise pass args to fors33-verifier.
+# When run as a GitHub Action, inputs are passed as INPUT_* env vars.
+# Otherwise pass args through to fors33-verifier (e.g. docker run image --url ... --expected-hash ...).
 set -e
 
 if [ -n "$INPUT_URL" ] || [ -n "$INPUT_FILE" ]; then
+    # GitHub Action mode: build args from env
     set --
     [ -n "$INPUT_URL" ]          && set -- "$@" --url "$INPUT_URL"
     [ -n "$INPUT_FILE" ]         && set -- "$@" --file "$INPUT_FILE"
@@ -13,6 +15,7 @@ if [ -n "$INPUT_URL" ] || [ -n "$INPUT_FILE" ]; then
     exec fors33-verifier "$@"
 fi
 
+# If first arg is "serve" or "server", run URL-only API (no file uploads).
 case "$1" in
   serve|server) exec python /app/server_url_only.py ;;
   *)            exec fors33-verifier "$@" ;;

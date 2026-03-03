@@ -1,5 +1,10 @@
 # fors33-verifier
 
+[![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/ci.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
+[![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
+
 Standalone verification for attested data segments. For machine-readable context (LLMs, crawlers), see [LLM_CONTEXT.md](LLM_CONTEXT.md). Confirm that a data segment matches a published SHA-256 hash.
 
 ## Install
@@ -47,7 +52,7 @@ Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) o
 
 ```yaml
 - name: Verify data integrity
-  uses: jhartyharr23/fors33-verifier@v1  # or your tag
+  uses: fors33-official/fors33-verifier@v1  # or your tag
   with:
     file: ./dist/artifact.bin
     expected-hash: 'abc123...'
@@ -56,20 +61,20 @@ Use **FORS33 Data Provenance Check** in your workflow. The step fails (exit 1) o
 For URL verification (presigned URLs only; no file uploads):
 
 ```yaml
-- uses: jhartyharr23/fors33-verifier@v1
+- uses: fors33-official/fors33-verifier@v1
   with:
     url: 'https://example.com/presigned.csv'
     expected-hash: 'abc123...'
 ```
 
-[Automate at scale: fors33.com/products](https://fors33.com/products)
+The FORS33 Data Provenance Kit runs on AWS S3, Snowflake, and local infrastructure. Procure licensing at [fors33.com](https://fors33.com) or [GitHub Marketplace](https://github.com/marketplace).
 
 ## Docker
 
 ```bash
-docker run --rm ghcr.io/jhartyharr23/fors33-verifier:latest --url "https://..." --expected-hash <sha256>
+docker run --rm ghcr.io/fors33/fors33-verifier:latest --url "https://..." --expected-hash <sha256>
 # or
-docker run --rm docker.io/fors33/verifier:latest --file /data/file.csv --expected-hash <sha256>
+docker run --rm docker.io/fors33/fors33-verifier:latest --file /data/file.csv --expected-hash <sha256>
 ```
 
 ## URL-only API

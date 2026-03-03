@@ -22,7 +22,7 @@ This package uses PyPI Trusted Publishing. No API tokens are stored in the repo.
 For the initial PyPI release, you may need to create the project first:
 
 ```bash
-cd products/dpk/open_source
+cd products/dpk/open_source/fors33-verifier
 python -m pip install build twine
 python -m build
 twine upload dist/*
