@@ -1,9 +1,0 @@
-LICENSE
-README.md
-pyproject.toml
-verify_dpk.py
-fors33_verifier.egg-info/PKG-INFO
-fors33_verifier.egg-info/SOURCES.txt
-fors33_verifier.egg-info/dependency_links.txt
-fors33_verifier.egg-info/entry_points.txt
-fors33_verifier.egg-info/top_level.txt

@@ -1,2 +1,0 @@
-[console_scripts]
-fors33-verifier = verify_dpk:main
