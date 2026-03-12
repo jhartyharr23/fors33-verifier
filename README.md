@@ -1,6 +1,6 @@
 # fors33-verifier
 
-[![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/build-push-fors33-verifier-docker.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
@@ -12,6 +12,8 @@ Standalone verification for attested data segments and general-purpose file inte
 ```bash
 pip install fors33-verifier
 ```
+
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images.
 
 ## Usage
 
@@ -44,8 +46,9 @@ The attestation record JSON must contain `byte_start`, `byte_end`, and `hash`. U
 
 **Directory verification (manifest mode):**
 ```bash
-fors33-verifier --mode manifest --file ./baseline.sha256 --target-dir ./root --format json
+fors33-verifier --mode manifest --file ./baseline.sha256 --root ./root --format json
 ```
+Use `--root` (or deprecated `--target-dir`) for the directory to verify. MD5/SHA-1 in manifests are rejected by default; use `--force-insecure` for legacy manifests.
 Verify a directory against a checksum manifest (GNU/BSD-style text or JSON). Emits a structured drift report with `modified`, `created`, `deleted`, `mutated_during_verification`, and `skipped`.
 
 **Sidecar verification:**

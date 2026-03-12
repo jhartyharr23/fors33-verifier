@@ -7,4 +7,5 @@ build/
 .env
 env/
 venv/
+.pypirc
 .venv/
