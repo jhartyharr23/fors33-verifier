@@ -2,6 +2,34 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.4.0] - 2026-03-24
+
+### Added
+
+- **Strict JSON `.f33` parser**: sidecars now require in-toto Statement v0.1-style JSON structure with validated `subject`, digest, range, signature, and timestamp fields.
+- **Signature-first verification path**: Ed25519 signature is verified before hashing target bytes to avoid unnecessary CPU work on invalid seals.
+- **Manifest triangle verification**: manifest digest is cross-checked against signed sidecar digest before file hash comparison.
+- **Manifest fail-fast compromise detection**: signed sidecar and manifest digest disagreement raises `ManifestCompromisedError` and emits `[ ERR_MANIFEST_COMPROMISED: Root of trust invalid ]`.
+- **Missing-seal critical status**: manifest entries without a sidecar emit `[ ERR_MISSING_SEAL ]` and fail verification.
+- **Optional TSA verification**: `--verify-tsa` validates optional TSA signature blocks in JSON sidecars.
+- **Deterministic fixture pack**: committed `test-data/verifier-0.4.0/` fixtures for valid, bad-signature, data-drift, manifest-compromise, missing-seal, and TSA scenarios.
+
+### Changed
+
+- **Canonical payload model**: switched to deterministic non-DSSE canonical JSON payload bytes for Ed25519 verification in `0.4.0`.
+- **Status propagation**: severe verdict strings now flow through drift rows using existing flat schema fields (`status`, `reason`).
+- **Artifact handling**: manifest-mode ignore path now excludes `*.f33` and `fors33-manifest.json` at startup.
+- **Exit codes**:
+  - `0`: verified / no drift
+  - `1`: drift conditions, including `[ ERR_MISSING_SEAL ]` and data drift
+  - `2`: invalid invocation / usage errors
+  - `3`: severe trust failures (manifest compromise, bad signature, invalid TSA)
+
+### Documentation
+
+- Added concise compliance warning in `README.md` with link to `LEGAL_DISCLAIMER.md`.
+- Added dedicated `LEGAL_DISCLAIMER.md` for legal and regulatory boundary language.
+
 ## [0.3.0] - 2026-03-10
 
 ### Added

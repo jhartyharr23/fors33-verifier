@@ -1,0 +1,9 @@
+{
+  "files": [
+    {
+      "path": "payload.txt",
+      "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "algo": "sha256"
+    }
+  ]
+}

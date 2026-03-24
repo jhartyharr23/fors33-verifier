@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -35,8 +36,26 @@ except ImportError:
     urllib = None
 
 _CTA = "[TOOLCHAIN] : FORS33 Data Provenance Kit"
+_ERR_INVALID_SEAL_FORMAT = "[ ERR_INVALID_SEAL_FORMAT ]"
+_ERR_MISSING_SEAL = "[ ERR_MISSING_SEAL ]"
+_ERR_MANIFEST_COMPROMISED = "[ ERR_MANIFEST_COMPROMISED: Root of trust invalid ]"
+_ERR_BAD_SIGNATURE = "[ TAMPER DETECTED: BAD SIGNATURE ]"
+_ERR_DATA_DRIFT = "[ SEAL BROKEN: DATA DRIFT ]"
+_ERR_TSA_INVALID = "[ ERR_INVALID_TSA ]"
+
+EXIT_OK = 0
+EXIT_DRIFT = 1
+EXIT_USAGE = 2
+EXIT_SEVERE = 3
 
 _MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+
+
+def _print_compliance_notice() -> None:
+    print("[NOTICE]    : FORS33 Verifier is provided \"AS IS\" without warranty of any kind.", file=sys.stderr)
+    print("[NOTICE]    : Cryptographic verification of data integrity does not constitute legal, financial,", file=sys.stderr)
+    print("[NOTICE]    : or regulatory compliance (e.g., SEC 17a-4, CFTC 1.31) on its own.", file=sys.stderr)
+    print("[NOTICE]    : WORM-compliant storage must be configured independently.", file=sys.stderr)
 
 
 @dataclass
@@ -95,66 +114,106 @@ def _load_f33ignore_patterns(root: str) -> List[str]:
         pass
     return patterns
 
-# --- .f33 sidecar (canonical payload format must match attestation writer) ---
-_F33_LINE = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
+# --- .f33 sidecar (JSON statement format) ---
+
+
+class ManifestCompromisedError(RuntimeError):
+    """Raised when a signed sidecar disagrees with manifest digest."""
+
+    def __init__(self, rel: str, expected_digest: str, sidecar_digest: str) -> None:
+        super().__init__(_ERR_MANIFEST_COMPROMISED)
+        self.rel = rel
+        self.expected_digest = expected_digest
+        self.sidecar_digest = sidecar_digest
 
 
 def _parse_f33(sidecar_path: str) -> dict:
-    """Parse .f33 file; return dict with target, range_start, range_end, timestamp, sha256, public_key_hex, signature_hex."""
-    with open(path_for_kernel(sidecar_path), encoding="utf-8") as f:
-        content = f.read()
-    lines = content.splitlines()
-    in_block = False
-    parsed = {}
-    for line in lines:
-        line = line.strip()
-        if line == "BEGIN FORS33 ATTESTATION":
-            in_block = True
-            continue
-        if line == "END FORS33 ATTESTATION":
-            break
-        if not in_block:
-            continue
-        m = _F33_LINE.match(line)
-        if not m:
-            continue
-        key, value = m.group(1).upper(), m.group(2).strip()
-        if key == "TARGET":
-            parsed["target"] = value
-        elif key == "RANGE":
-            parts = value.split(":")
-            if len(parts) != 2:
-                raise ValueError(f"Invalid RANGE in .f33: {value}")
-            parsed["range_start"] = int(parts[0].strip())
-            parsed["range_end"] = int(parts[1].strip())
-        elif key == "TIMESTAMP":
-            parsed["timestamp"] = value
-        elif key == "SHA256":
-            parsed["sha256"] = value.lower()
-        elif key == "PUBKEY_ED25519":
-            parsed["public_key_hex"] = value.lower()
-        elif key == "SIGNATURE_ED25519":
-            parsed["signature_hex"] = value.lower()
+    """
+    Parse JSON .f33 sidecar with deterministic non-DSSE payload fields.
+
+    Required semantic fields:
+      - subject.name
+      - subject.digest.sha256
+      - predicate.range.start/end
+      - predicate.timestamp
+      - predicate.signature.public_key_hex / signature_hex
+    Optional:
+      - predicate.tsa.{payload,public_key_hex,signature_hex}
+    """
+    try:
+        with open(path_for_kernel(sidecar_path), encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception as e:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} non-json sidecar: {e}") from e
+
+    if not isinstance(doc, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} root must be JSON object")
+
+    subject = doc.get("subject")
+    if not isinstance(subject, list) or not subject:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing subject array")
+    subj0 = subject[0]
+    if not isinstance(subj0, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} invalid subject entry")
+
+    target = subj0.get("name")
+    digest_obj = subj0.get("digest")
+    if not isinstance(digest_obj, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing subject.digest")
+    sha256 = str(digest_obj.get("sha256", "")).lower()
+
+    predicate = doc.get("predicate")
+    if not isinstance(predicate, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate")
+
+    range_obj = predicate.get("range")
+    if not isinstance(range_obj, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate.range")
+    try:
+        range_start = int(range_obj.get("start"))
+        range_end = int(range_obj.get("end"))
+    except Exception as e:
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} invalid range bounds") from e
+
+    timestamp = predicate.get("timestamp")
+    sig_obj = predicate.get("signature")
+    if not isinstance(sig_obj, dict):
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing predicate.signature")
+    public_key_hex = str(sig_obj.get("public_key_hex", "")).lower()
+    signature_hex = str(sig_obj.get("signature_hex", "")).lower()
+
+    parsed = {
+        "target": target,
+        "range_start": range_start,
+        "range_end": range_end,
+        "timestamp": timestamp,
+        "sha256": sha256,
+        "public_key_hex": public_key_hex,
+        "signature_hex": signature_hex,
+        "tsa": predicate.get("tsa"),
+    }
     for r in ("target", "range_start", "range_end", "timestamp", "sha256", "public_key_hex", "signature_hex"):
-        if r not in parsed:
-            raise ValueError(f"Missing required field in .f33: {r}")
+        if parsed.get(r) in (None, ""):
+            raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} missing required field: {r}")
     if len(parsed["sha256"]) != 64:
-        raise ValueError("SHA256 in .f33 must be 64 hex characters")
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} subject.digest.sha256 must be 64 hex chars")
     if len(parsed["public_key_hex"]) != 64:
-        raise ValueError("PUBKEY_ED25519 in .f33 must be 64 hex characters")
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} signature.public_key_hex must be 64 hex chars")
     if len(parsed["signature_hex"]) != 128:
-        raise ValueError("SIGNATURE_ED25519 in .f33 must be 128 hex characters")
+        raise ValueError(f"{_ERR_INVALID_SEAL_FORMAT} signature.signature_hex must be 128 hex chars")
     return parsed
 
 
 def _canonical_payload_f33(target_name: str, range_start: int, range_end: int, timestamp: str, file_hash: str) -> bytes:
-    """Build canonical payload bytes (no trailing newline) for Ed25519 verification."""
-    return (
-        f"TARGET:{target_name}\n"
-        f"RANGE:{range_start}:{range_end}\n"
-        f"TIMESTAMP:{timestamp}\n"
-        f"SHA256:{file_hash}"
-    ).encode("utf-8")
+    """Deterministic non-DSSE canonical JSON payload for Ed25519 verification."""
+    payload_obj = {
+        "target": target_name,
+        "range_start": int(range_start),
+        "range_end": int(range_end),
+        "timestamp": timestamp,
+        "sha256": file_hash.lower(),
+    }
+    return json.dumps(payload_obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
 def _verify_ed25519_f33(public_key_hex: str, signature_hex: str, payload_bytes: bytes) -> None:
@@ -166,6 +225,25 @@ def _verify_ed25519_f33(public_key_hex: str, signature_hex: str, payload_bytes: 
     signature_bytes = bytes.fromhex(signature_hex)
     public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes)
     public_key.verify(signature_bytes, payload_bytes)
+
+
+def _verify_tsa(parsed: dict) -> tuple[bool, str]:
+    """Optional TSA block verification for JSON sidecar."""
+    tsa = parsed.get("tsa")
+    if tsa is None:
+        return True, "tsa_not_present"
+    if not isinstance(tsa, dict):
+        return False, f"{_ERR_TSA_INVALID} malformed tsa object"
+    payload = tsa.get("payload")
+    public_key_hex = str(tsa.get("public_key_hex", "")).lower()
+    signature_hex = str(tsa.get("signature_hex", "")).lower()
+    if not payload or len(public_key_hex) != 64 or len(signature_hex) != 128:
+        return False, f"{_ERR_TSA_INVALID} missing tsa fields"
+    try:
+        _verify_ed25519_f33(public_key_hex, signature_hex, str(payload).encode("utf-8"))
+    except Exception as e:
+        return False, f"{_ERR_TSA_INVALID} {e}"
+    return True, "tsa_verified"
 
 
 def _verify_manifest_ed25519_signature(
@@ -217,20 +295,11 @@ def _verify_manifest_ed25519_signature(
     return True, "Manifest signature verified"
 
 
-def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None) -> tuple[bool, str]:
+def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None, verify_tsa: bool = False) -> tuple[bool, str]:
     """Verify .f33 sidecar: resolve target, hash range, check SHA-256 and Ed25519. Returns (success, message)."""
     parsed = _parse_f33(sidecar_path)
     base = os.path.dirname(os.path.abspath(sidecar_path)) if target_dir is None else target_dir
     target_path = os.path.join(base, parsed["target"])
-    if not os.path.isfile(path_for_kernel(target_path)):
-        return False, f"Target file not found: {target_path}"
-    computed = hash_file_range(
-        target_path,
-        parsed["range_start"],
-        parsed["range_end"],
-    )
-    if computed != parsed["sha256"]:
-        return False, f"SHA-256 mismatch: computed {computed}, expected {parsed['sha256']}"
     payload = _canonical_payload_f33(
         parsed["target"],
         parsed["range_start"],
@@ -238,10 +307,23 @@ def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None) -> tupl
         parsed["timestamp"],
         parsed["sha256"],
     )
+    if not os.path.isfile(path_for_kernel(target_path)):
+        return False, f"Target file not found: {target_path}"
     try:
         _verify_ed25519_f33(parsed["public_key_hex"], parsed["signature_hex"], payload)
     except Exception as e:
-        return False, f"Ed25519 verification failed: {e}"
+        return False, f"{_ERR_BAD_SIGNATURE} {e}"
+    if verify_tsa:
+        tsa_ok, tsa_msg = _verify_tsa(parsed)
+        if not tsa_ok:
+            return False, tsa_msg
+    computed = hash_file_range(
+        target_path,
+        parsed["range_start"],
+        parsed["range_end"],
+    )
+    if computed != parsed["sha256"]:
+        return False, f"{_ERR_DATA_DRIFT} computed {computed}, expected {parsed['sha256']}"
     return True, "VERIFIED"
 
 
@@ -265,6 +347,7 @@ def _log_output(target: str, computed_hash: str, status: str) -> None:
     print(f"[SHA-256]   : {computed_hash}", file=sys.stderr)
     print(f"[STATUS]    : {_ansi_status(status)}", file=sys.stderr)
     print(f"[NOTICE]    : {_CTA}", file=sys.stderr)
+    _print_compliance_notice()
 
 
 def hash_file_range(file_path: str, byte_start: int = 0, byte_end: int | None = None) -> str:
@@ -308,6 +391,7 @@ def verify_directory_from_manifest(
     force_insecure: bool = False,
     progress_event_callback: Callable[[dict], None] | None = None,
     strip_mount_prefix: str = "",
+    verify_tsa: bool = False,
 ) -> dict:
     """
     Verify a directory tree against a manifest.
@@ -408,10 +492,39 @@ def verify_directory_from_manifest(
     if sys.stderr.isatty():
         print("\r\033[K", end="", file=sys.stderr)
 
+    _abort_event = threading.Event()
+
     def _hash_worker(item: tuple[str, str, str, str, str]):
         work_key, rel, path, algo, expected = item
+        if _abort_event.is_set():
+            return ("aborted", work_key, rel, algo, expected, None, "manifest_compromised_abort")
         kpath = path_for_kernel(path)
+        sidecar_path = f"{path}.f33"
         try:
+            if not os.path.isfile(kpath):
+                return ("deleted", work_key, rel, algo, expected, None, None)
+            if not os.path.isfile(path_for_kernel(sidecar_path)):
+                return ("missing_seal", work_key, rel, algo, expected, None, _ERR_MISSING_SEAL)
+            parsed = _parse_f33(sidecar_path)
+            payload = _canonical_payload_f33(
+                parsed["target"],
+                parsed["range_start"],
+                parsed["range_end"],
+                parsed["timestamp"],
+                parsed["sha256"],
+            )
+            try:
+                _verify_ed25519_f33(parsed["public_key_hex"], parsed["signature_hex"], payload)
+            except Exception as e:
+                return ("bad_signature", work_key, rel, algo, expected, None, f"{_ERR_BAD_SIGNATURE} {e}")
+            if verify_tsa:
+                tsa_ok, tsa_msg = _verify_tsa(parsed)
+                if not tsa_ok:
+                    return ("tsa_invalid", work_key, rel, algo, expected, None, tsa_msg)
+            sidecar_digest = str(parsed["sha256"]).lower()
+            if sidecar_digest != expected.lower():
+                _abort_event.set()
+                raise ManifestCompromisedError(rel, expected, sidecar_digest)
             st_before = os.stat(kpath)
             before_key: int | tuple[int, int] = (
                 (st_before.st_dev, st_before.st_ino)
@@ -449,6 +562,8 @@ def verify_directory_from_manifest(
                 if st_after.st_ino != 0
                 else int(st_after.st_mtime)
             )
+        except ManifestCompromisedError:
+            raise
         except FileNotFoundError:
             return ("deleted", work_key, rel, algo, expected, None, None)
         except PermissionError:
@@ -471,7 +586,7 @@ def verify_directory_from_manifest(
                 "inode_or_mtime_changed_during_hash",
             )
         if computed.lower() != expected.lower():
-            return ("modified", work_key, rel, algo, expected, computed.lower(), None)
+            return ("seal_broken", work_key, rel, algo, expected, computed.lower(), _ERR_DATA_DRIFT)
         return ("ok", work_key, rel, algo, expected, None, None)
 
     executor = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
@@ -480,14 +595,45 @@ def verify_directory_from_manifest(
             _hash_worker, _work_generator()
         ):
             work_key = wk
-            if kind == "modified":
+            if kind == "seal_broken":
                 modified.append(
                     {
                         "path": rel,
                         "digest": computed,
                         "expected_digest": expected,
                         "algo": algo,
-                        "status": "modified",
+                        "status": _ERR_DATA_DRIFT,
+                        "reason": err,
+                    }
+                )
+            elif kind == "missing_seal":
+                modified.append(
+                    {
+                        "path": rel,
+                        "algo": algo,
+                        "expected_digest": expected,
+                        "status": _ERR_MISSING_SEAL,
+                        "reason": err or _ERR_MISSING_SEAL,
+                    }
+                )
+            elif kind == "bad_signature":
+                modified.append(
+                    {
+                        "path": rel,
+                        "algo": algo,
+                        "expected_digest": expected,
+                        "status": _ERR_BAD_SIGNATURE,
+                        "reason": err or _ERR_BAD_SIGNATURE,
+                    }
+                )
+            elif kind == "tsa_invalid":
+                modified.append(
+                    {
+                        "path": rel,
+                        "algo": algo,
+                        "expected_digest": expected,
+                        "status": _ERR_TSA_INVALID,
+                        "reason": err or _ERR_TSA_INVALID,
                     }
                 )
             elif kind == "mutated":
@@ -511,6 +657,21 @@ def verify_directory_from_manifest(
                 )
             # Mark as seen for all non-deleted paths
             live_paths.pop(work_key, None)
+    except ManifestCompromisedError as e:
+        executor.shutdown(wait=False, cancel_futures=True)
+        for k in list(live_paths.keys()):
+            rel_only = k.split(":", 1)[1] if ":" in k and k[0].isdigit() else k
+            if rel_only == e.rel:
+                live_paths.pop(k, None)
+        modified.append(
+            {
+                "path": e.rel,
+                "expected_digest": e.expected_digest,
+                "digest": e.sidecar_digest,
+                "status": _ERR_MANIFEST_COMPROMISED,
+                "reason": _ERR_MANIFEST_COMPROMISED,
+            }
+        )
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         sys.exit(130)
@@ -519,7 +680,11 @@ def verify_directory_from_manifest(
 
     # Remaining live files that were not in manifest are "created"
     for norm_rel in sorted(live_paths.keys()):
-        created.append({"path": norm_rel, "status": "created"})
+        rel_only = norm_rel.split(":", 1)[1] if ":" in norm_rel and norm_rel[0].isdigit() else norm_rel
+        rel_lower = rel_only.lower()
+        if rel_lower.endswith(".f33") or rel_lower.endswith("/fors33-manifest.json") or rel_lower == "fors33-manifest.json":
+            continue
+        created.append({"path": rel_only, "status": "created"})
 
     end_monotonic = datetime.now(timezone.utc).timestamp()
 
@@ -558,6 +723,7 @@ def execute_verification(
     force_insecure: bool = False,
     progress_event_callback: Callable[[dict], None] | None = None,
     strip_mount_prefix: str = "",
+    verify_tsa: bool = False,
 ) -> VerificationReport:
     """
     Library entry point: verify directory against manifest.
@@ -575,6 +741,7 @@ def execute_verification(
         force_insecure=force_insecure,
         progress_event_callback=progress_event_callback,
         strip_mount_prefix=strip_mount_prefix,
+        verify_tsa=verify_tsa,
     )
     return VerificationReport(
         modified=result["modified"],
@@ -691,6 +858,11 @@ def main() -> int:
         help="Path to Ed25519 public key file for manifest signature verification.",
     )
     parser.add_argument(
+        "--verify-tsa",
+        action="store_true",
+        help="Verify optional TSA signature block when present in JSON .f33 sidecars.",
+    )
+    parser.add_argument(
         "--emit-report",
         action="store_true",
         help="Emit a one-line executive summary report.",
@@ -723,34 +895,35 @@ def main() -> int:
             import blake3  # noqa: F401
         except ImportError:
             print("[ERROR] --algo blake3 requires the blake3 package. pip install blake3", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
 
     if not args.force_insecure and args.algo and args.algo.lower() in ("md5", "sha1"):
         print(
             "[ERROR] MD5 and SHA-1 are deprecated. Use sha256, sha512, or blake3. Override with --force-insecure for legacy.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
 
     # Legacy single-file sidecar verification path (backwards compatible).
     if args.mode == "single" and args.sidecar:
         try:
-            ok, msg = verify_sidecar_f33(args.sidecar, target_dir)
+            ok, msg = verify_sidecar_f33(args.sidecar, target_dir, verify_tsa=args.verify_tsa)
         except Exception as e:
             print(f"Sidecar verification error: {e}", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
         target_label = args.sidecar
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         print(f"[SYS.TIME]  : {ts}", file=sys.stderr)
         print(f"[SIDECAR]   : {target_label}", file=sys.stderr)
         print(f"[STATUS]    : {msg}", file=sys.stderr)
         print(f"[NOTICE]    : {_CTA}", file=sys.stderr)
-        return 0 if (ok or args.warn_only) else 1
+        _print_compliance_notice()
+        return EXIT_OK if (ok or args.warn_only) else EXIT_DRIFT
 
     if args.mode == "manifest":
         if not args.file:
             print("[ERROR] --file must point to the manifest path in --mode manifest.", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
         manifest_path = args.file
         root_dir = target_dir or os.path.dirname(os.path.abspath(manifest_path)) or "."
         default_algo = args.algo or "sha256"
@@ -762,7 +935,7 @@ def main() -> int:
                     "Error: --verify-manifest-sig and --pubkey must both be provided for manifest signature verification.",
                     file=sys.stderr,
                 )
-                return 2
+                return EXIT_USAGE
             ok_sig, msg_sig = _verify_manifest_ed25519_signature(
                 manifest_path, args.verify_manifest_sig, args.pubkey
             )
@@ -771,6 +944,7 @@ def main() -> int:
                 print(f"[WARNING] Manifest signature check failed: {msg_sig}", file=sys.stderr)
 
         ignore_list = list(args.ignore_pattern or []) + _load_f33ignore_patterns(root_dir)
+        ignore_list.extend(["*.f33", "fors33-manifest.json", "**/fors33-manifest.json"])
         try:
             report = execute_verification(
                 manifest_path=manifest_path,
@@ -782,6 +956,7 @@ def main() -> int:
                 force_insecure=args.force_insecure,
                 progress_event_callback=None,
                 strip_mount_prefix=args.strip_mount_prefix or "",
+                verify_tsa=args.verify_tsa,
             )
             result = {
                 "schema_version": report.schema_version,
@@ -797,7 +972,7 @@ def main() -> int:
             }
         except Exception as e:
             print(f"Manifest verification failed: {e}", file=sys.stderr)
-            return 3
+            return EXIT_SEVERE
 
         if signature_result is not None:
             result["manifest_signature"] = signature_result
@@ -805,7 +980,8 @@ def main() -> int:
         modified = result.get("modified") or []
         created = result.get("created") or []
         deleted = result.get("deleted") or []
-        drift_detected = bool(modified or created or deleted)
+        mutated = result.get("mutated_during_verification") or []
+        drift_detected = bool(modified or created or deleted or mutated)
 
         summary_line = (
             f"Baseline: {manifest_path} | Root: {root_dir} | "
@@ -837,9 +1013,16 @@ def main() -> int:
                 p = s.get("path", "")
                 print(f"  [SKIPPED] {p}" if not sys.stderr.isatty() else f"  \033[90m[SKIPPED]\033[0m {p}", file=sys.stderr)
 
-        exit_code = 1 if drift_detected else 0
+        exit_code = EXIT_DRIFT if drift_detected else EXIT_OK
+        severe_statuses = {
+            _ERR_BAD_SIGNATURE,
+            _ERR_MANIFEST_COMPROMISED,
+            _ERR_TSA_INVALID,
+        }
+        if any(str(m.get("status", "")) in severe_statuses for m in modified):
+            exit_code = EXIT_SEVERE
         if args.warn_only:
-            return 0
+            return EXIT_OK
         return exit_code
 
     if args.mode == "sidecars":
@@ -898,7 +1081,7 @@ def main() -> int:
                 lower = name.lower()
                 if lower.endswith(".f33"):
                     try:
-                        ok, msg = verify_sidecar_f33(full_path)
+                        ok, msg = verify_sidecar_f33(full_path, verify_tsa=args.verify_tsa)
                     except Exception as e:
                         skipped.append({"sidecar": norm_rel, "error": str(e)})
                         continue
@@ -976,9 +1159,9 @@ def main() -> int:
         else:
             print(summary_line, file=sys.stderr)
 
-        exit_code = 1 if failed else 0
+        exit_code = EXIT_DRIFT if failed else EXIT_OK
         if args.warn_only:
-            return 0
+            return EXIT_OK
         return exit_code
 
     # Default: single mode URL/file verification
@@ -995,18 +1178,18 @@ def main() -> int:
             expected_hash = record.get("hash")
         except Exception as e:
             print(f"Failed to load record: {e}", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
 
     if not expected_hash:
         print("[ERROR] --expected-hash or a valid --record is required in --mode single.", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
 
     algo = args.algo or infer_algo_from_digest(expected_hash) or "sha256"
 
     if args.url:
         if not args.url.startswith("https://"):
             print("[ERROR] --url must be HTTPS", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
         try:
             target_label = (
                 args.url
@@ -1016,11 +1199,11 @@ def main() -> int:
             computed = download_and_hash(args.url, byte_start, byte_end, algo=algo)
             rc = execute_verification_single(target_label, computed, expected_hash)
             if args.warn_only and rc == 1:
-                return 0
+                return EXIT_OK
             return rc
         except Exception as e:
             print(f"Remote fetch failed: {e}", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
 
     if args.file:
         try:
@@ -1033,14 +1216,14 @@ def main() -> int:
             computed = hash_file(args.file, algo=algo, start=b_start, end=byte_end)
             rc = execute_verification_single(target_label, computed, expected_hash)
             if args.warn_only and rc == 1:
-                return 0
+                return EXIT_OK
             return rc
         except Exception as e:
             print(f"Local read failed: {e}", file=sys.stderr)
-            return 2
+            return EXIT_USAGE
 
     print("[ERROR] Must provide either --url or --file", file=sys.stderr)
-    return 2
+    return EXIT_USAGE
 
 
 if __name__ == "__main__":

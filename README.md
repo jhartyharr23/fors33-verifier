@@ -1,11 +1,15 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
+[![Release](https://img.shields.io/badge/release-0.4.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Docker Tag](https://img.shields.io/badge/docker-0.4.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
 Standalone verification for attested data segments and general-purpose file integrity baselines. For machine-readable context (LLMs, crawlers), see [LLM_CONTEXT.md](LLM_CONTEXT.md). Confirm that a data segment or directory tree matches published hashes.
+
+> Warning: FORS33 Verifier provides cryptographic integrity checks only. It does not independently guarantee legal or regulatory compliance. See [LEGAL_DISCLAIMER.md](LEGAL_DISCLAIMER.md).
 
 ## Install
 
@@ -57,9 +61,22 @@ fors33-verifier --mode sidecars --file ./root --format json
 ```
 Walk the tree and verify `.f33`, `.sha256`, `.sha512`, and `.md5` sidecars in place.
 
+Optional TSA verification for JSON `.f33` sidecars:
+```bash
+fors33-verifier --mode manifest --verify-tsa --file ./manifest.json --root ./root --format json
+```
+
 ## Output
 
-System-log format with timestamp, target, SHA-256, and status. Exits 0 on match, 1 on mismatch. Manifest/sidecars modes support `--format json` with `--warn-only` to report drift without failing.
+System-log format with timestamp, target, SHA-256, and status.
+
+Exit codes:
+- `0`: verified / no drift
+- `1`: drift or missing seal (`[ ERR_MISSING_SEAL ]`)
+- `2`: invocation or parameter misuse
+- `3`: severe trust failures (e.g. bad signature, manifest compromise, invalid TSA)
+
+Manifest/sidecars modes support `--format json` with `--warn-only` to report drift without failing.
 
 ## GitHub Action (CI/CD)
 
