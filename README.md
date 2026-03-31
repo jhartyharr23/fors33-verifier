@@ -1,9 +1,9 @@
 # fors33-verifier
 
 [![CI](https://img.shields.io/github/actions/workflow/status/fors33-official/fors33-verifier/publish-fors33-verifier.yml?branch=main&style=flat-square)](https://github.com/fors33-official/fors33-verifier/actions)
-[![Release](https://img.shields.io/badge/release-0.4.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
+[![Release](https://img.shields.io/badge/release-0.5.0-blue?style=flat-square)](https://pypi.org/project/fors33-verifier/)
 [![PyPI](https://img.shields.io/pypi/v/fors33-verifier?style=flat-square)](https://pypi.org/project/fors33-verifier/)
-[![Docker Tag](https://img.shields.io/badge/docker-0.4.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
+[![Docker Tag](https://img.shields.io/badge/docker-0.5.0%20%7C%20latest-2496ED?style=flat-square&logo=docker&logoColor=white)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![Docker Pulls](https://img.shields.io/docker/pulls/fors33/fors33-verifier?style=flat-square)](https://hub.docker.com/r/fors33/fors33-verifier)
 [![License](https://img.shields.io/github/license/fors33-official/fors33-verifier?style=flat-square)](https://github.com/fors33-official/fors33-verifier/blob/main/LICENSE)
 
@@ -66,6 +66,18 @@ Optional TSA verification for JSON `.f33` sidecars:
 fors33-verifier --mode manifest --verify-tsa --file ./manifest.json --root ./root --format json
 ```
 
+With `--verify-tsa`, the verifier accepts **`predicate.tsa.rfc3161_token_b64`** (RFC 3161 `TimeStampResp` DER, Base64) and/or the legacy **Ed25519** `predicate.tsa` block. RFC tokens are checked offline: PKI status granted, CMS signature on the timestamp token, and **message imprint** (hash OID from the token) over the same **canonical JSON** payload used for the main Ed25519 signature. MD5/SHA-1 imprint algorithms are rejected.
+
+**Manifest hashing workers** (thread pool only):
+
+```bash
+fors33-verifier --mode manifest --workers 8 --file ./manifest.json --root ./root
+```
+
+`FORS33_WORKERS` overrides `--workers` after arguments are parsed. If unset, `<= 0`, or invalid, the default is `_default_worker_count()` (or `4` when `FORS33_EXTENSION_MODE=1`), capped at `64` when explicitly set.
+
+**Large-file hashing** (`hash_core`): optional mmap window controlled by `FORS33_MMAP_MIN_MB` and `FORS33_MMAP_MAX_MB` (defaults `500` and `4000`). Optional global read throttle: `set_global_read_bytes_per_second` (for hosted/extension use).
+
 ## Output
 
 System-log format with timestamp, target, SHA-256, and status.
@@ -115,7 +127,7 @@ For a hosted API that verifies **presigned URLs only** (no file uploads), run th
 
 ## Requirements
 
-Python 3.9–3.12. `cryptography` (required). Optional `blake3` for faster hashing. Platforms: Linux, macOS, Windows.
+Python 3.9–3.12. `cryptography` and `asn1crypto` (required). Optional `blake3` for faster hashing. Platforms: Linux, macOS, Windows.
 
 ## License
 

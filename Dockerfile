@@ -41,7 +41,8 @@ COPY entrypoint.sh /entrypoint.sh
 COPY server_url_only.py /app/server_url_only.py
 COPY serve /usr/local/bin/serve
 
-RUN /opt/venv/bin/pip uninstall -y pip setuptools wheel \
+RUN /usr/local/bin/python -m pip uninstall -y pip setuptools wheel \
+    && /opt/venv/bin/pip uninstall -y pip setuptools wheel \
     && chmod +x /entrypoint.sh \
     && chmod +x /usr/local/bin/serve
 

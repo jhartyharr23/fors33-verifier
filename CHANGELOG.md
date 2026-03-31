@@ -2,6 +2,20 @@
 
 All notable changes to fors33-verifier are documented here.
 
+## [0.5.0] - 2026-03-31
+
+### Added
+
+- **Compliance notice**: reference `_COMPLIANCE_NOTICE_LINES` printed to **stderr before** CLI parsing.
+- **Manifest worker pool**: `--workers` and `FORS33_WORKERS` (env overrides CLI after parse); `max_workers` on `verify_directory_from_manifest` / `execute_verification`; auto default via `_default_worker_count()`; cap **64**; manifest mode only (sidecars stay sequential).
+- **RFC 3161 TSA**: `predicate.tsa.rfc3161_token_b64` with offline checks: `TimeStampResp` status granted, **CMS signature** over encapsulated **TSTInfo**, **messageImprint** via OID → `hashlib` on the same canonical JSON payload as Ed25519; weak imprint OIDs rejected (MD5, SHA-1). Dependency: **asn1crypto**.
+- **Legacy TSA**: existing Ed25519 `predicate.tsa` block still supported when RFC token absent; `--verify-tsa` fail-closed if neither is valid.
+- **`hash_core`**: mmap fast path with `FORS33_MMAP_MIN_MB` / `FORS33_MMAP_MAX_MB`, read throttle (`_throttle_before_read`, `set_global_read_bytes_per_second`), `path_for_kernel` / `path_from_kernel` aligned with reference behavior.
+
+### Changed
+
+- Startup compliance copy aligned with reference verifier notice lines.
+
 ## [0.4.0] - 2026-03-24
 
 ### Added

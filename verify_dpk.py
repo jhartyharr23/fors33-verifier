@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 try:  # Support both package and flat-module imports
     from .hash_core import hash_file, hash_stream, infer_algo_from_digest, path_for_kernel  # type: ignore[import]
@@ -48,14 +48,30 @@ EXIT_DRIFT = 1
 EXIT_USAGE = 2
 EXIT_SEVERE = 3
 
-_MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+_COMPLIANCE_NOTICE_LINES = (
+    "[NOTICE]  FORS33 Data Provenance Kit verifier",
+    "[NOTICE]  Output describes integrity checks only; it is not legal advice.",
+    "[NOTICE]  Validate results in your own compliance and audit workflow.",
+    "[NOTICE]  Unauthorized use is prohibited.",
+)
 
 
 def _print_compliance_notice() -> None:
-    print("[NOTICE]    : FORS33 Verifier is provided \"AS IS\" without warranty of any kind.", file=sys.stderr)
-    print("[NOTICE]    : Cryptographic verification of data integrity does not constitute legal, financial,", file=sys.stderr)
-    print("[NOTICE]    : or regulatory compliance (e.g., SEC 17a-4, CFTC 1.31) on its own.", file=sys.stderr)
-    print("[NOTICE]    : WORM-compliant storage must be configured independently.", file=sys.stderr)
+    """Print startup compliance lines to stderr before any CLI parsing."""
+    for line in _COMPLIANCE_NOTICE_LINES:
+        print(line, file=sys.stderr)
+
+
+def _default_worker_count() -> int:
+    if os.environ.get("FORS33_EXTENSION_MODE", "").strip() == "1":
+        return 4
+    return min(32, (os.cpu_count() or 1) + 4)
+
+
+def _effective_worker_count(max_workers: int | None) -> int:
+    if max_workers is None or max_workers <= 0:
+        return _default_worker_count()
+    return min(64, int(max_workers))
 
 
 @dataclass
@@ -182,6 +198,13 @@ def _parse_f33(sidecar_path: str) -> dict:
     public_key_hex = str(sig_obj.get("public_key_hex", "")).lower()
     signature_hex = str(sig_obj.get("signature_hex", "")).lower()
 
+    tsa_obj = predicate.get("tsa")
+    rfc3161_b64: str | None = None
+    if isinstance(tsa_obj, dict):
+        raw_rfc = tsa_obj.get("rfc3161_token_b64")
+        if isinstance(raw_rfc, str) and raw_rfc.strip():
+            rfc3161_b64 = raw_rfc.strip()
+
     parsed = {
         "target": target,
         "range_start": range_start,
@@ -190,7 +213,8 @@ def _parse_f33(sidecar_path: str) -> dict:
         "sha256": sha256,
         "public_key_hex": public_key_hex,
         "signature_hex": signature_hex,
-        "tsa": predicate.get("tsa"),
+        "tsa": tsa_obj,
+        "rfc3161_token_b64": rfc3161_b64,
     }
     for r in ("target", "range_start", "range_end", "timestamp", "sha256", "public_key_hex", "signature_hex"):
         if parsed.get(r) in (None, ""):
@@ -227,23 +251,189 @@ def _verify_ed25519_f33(public_key_hex: str, signature_hex: str, payload_bytes: 
     public_key.verify(signature_bytes, payload_bytes)
 
 
-def _verify_tsa(parsed: dict) -> tuple[bool, str]:
-    """Optional TSA block verification for JSON sidecar."""
-    tsa = parsed.get("tsa")
-    if tsa is None:
-        return True, "tsa_not_present"
-    if not isinstance(tsa, dict):
-        return False, f"{_ERR_TSA_INVALID} malformed tsa object"
-    payload = tsa.get("payload")
-    public_key_hex = str(tsa.get("public_key_hex", "")).lower()
-    signature_hex = str(tsa.get("signature_hex", "")).lower()
-    if not payload or len(public_key_hex) != 64 or len(signature_hex) != 128:
-        return False, f"{_ERR_TSA_INVALID} missing tsa fields"
+def _tsa_imprint_oid_to_hash_name(oid: str) -> str:
+    """Map messageImprint.hashAlgorithm OID to hashlib name; reject weak algorithms."""
+    weak = {"1.3.14.3.2.26", "1.2.840.113549.2.5"}  # SHA-1, MD5 — rejected for TSA imprint
+    if oid in weak:
+        raise ValueError(f"TSA imprint uses rejected weak hash OID {oid}")
+    mapping = {
+        "2.16.840.1.101.3.4.2.1": "sha256",
+        "2.16.840.1.101.3.4.2.2": "sha384",
+        "2.16.840.1.101.3.4.2.3": "sha512",
+    }
+    if oid not in mapping:
+        raise ValueError(f"unsupported TSA imprint hash OID: {oid}")
+    return mapping[oid]
+
+
+def _cms_signed_data_from_content_info(ci) -> object:
+    from asn1crypto import cms, core
+
+    ct = ci["content_type"].dotted
+    if ct != "1.2.840.113549.1.7.2":
+        raise ValueError(f"expected CMS signedData, got content type {ct}")
+    content = ci["content"]
+    if isinstance(content, cms.SignedData):
+        return content
+    if content is None:
+        raise ValueError("empty signedData")
+    if isinstance(content, core.OctetString):
+        return cms.SignedData.load(content.native)
+    return cms.SignedData.load(content.dump())
+
+
+def _cms_certificates(signed_data) -> List[object]:
+    out: List[object] = []
+    bag = signed_data["certificates"]
+    if bag is None:
+        return out
+    for i in range(len(bag)):
+        ch = bag[i]
+        if ch.name == "certificate":
+            out.append(ch.chosen)
+    return out
+
+
+def _cms_match_signer_cert(signer_info, certs: Sequence[object]) -> object:
+    sid = signer_info["sid"]
+    if sid.name != "issuer_and_serial_number":
+        raise ValueError("unsupported SignerIdentifier (expected issuer and serial number)")
+    ias = sid.chosen
+    issuer = ias["issuer"]
+    serial = ias["serial_number"].native
+    for c in certs:
+        if c.serial_number.native == serial and c.issuer.dump() == issuer.dump():
+            return c
+    raise ValueError("signer certificate not found in timestamp token")
+
+
+def _cms_extract_tst_info(signed_data) -> object:
+    from asn1crypto import tsp as tsp_mod
+
+    encap = signed_data["encap_content_info"]
+    tst_oid = "1.2.840.113549.1.9.16.1.4"
+    if encap["content_type"].dotted != tst_oid:
+        raise ValueError(f"expected id-ct-TSTInfo encapsulated content, got {encap['content_type'].dotted}")
+    raw = encap["content"]
+    if raw is None:
+        raise ValueError("missing TSTInfo encapsulated content")
+    inner = raw.native
+    if not isinstance(inner, (bytes, bytearray)):
+        raise ValueError("TSTInfo encapsulated content must be octet string bytes")
+    return tsp_mod.TSTInfo.load(bytes(inner))
+
+
+def _cms_verify_signer_info(signer_info, signer_cert, signed_data) -> None:
+    from cryptography import x509 as crypto_x509
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa as rsa_alg
+
+    cert_crypto = crypto_x509.load_der_x509_certificate(signer_cert.dump(), default_backend())
+    pub = cert_crypto.public_key()
+    sig = signer_info["signature"].native
+    sa_oid = signer_info["signature_algorithm"]["algorithm"].dotted
+    signed_attrs = signer_info["signed_attrs"]
+    if signed_attrs is not None:
+        to_sign = signed_attrs.dump()
+    else:
+        encap = signed_data["encap_content_info"]
+        c = encap["content"]
+        to_sign = c.dump() if c is not None else b""
+
     try:
-        _verify_ed25519_f33(public_key_hex, signature_hex, str(payload).encode("utf-8"))
-    except Exception as e:
-        return False, f"{_ERR_TSA_INVALID} {e}"
-    return True, "tsa_verified"
+        if isinstance(pub, rsa_alg.RSAPublicKey):
+            if sa_oid == "1.2.840.113549.1.1.11":
+                pub.verify(sig, to_sign, padding.PKCS1v15(), hashes.SHA256())
+            elif sa_oid == "1.2.840.113549.1.1.12":
+                pub.verify(sig, to_sign, padding.PKCS1v15(), hashes.SHA384())
+            elif sa_oid == "1.2.840.113549.1.1.13":
+                pub.verify(sig, to_sign, padding.PKCS1v15(), hashes.SHA512())
+            else:
+                raise ValueError(f"unsupported RSA signature algorithm OID {sa_oid}")
+        elif isinstance(pub, ec.EllipticCurvePublicKey):
+            if sa_oid == "1.2.840.10045.4.3.2":
+                ha = hashes.SHA256()
+            elif sa_oid == "1.2.840.10045.4.3.3":
+                ha = hashes.SHA384()
+            elif sa_oid == "1.2.840.10045.4.3.4":
+                ha = hashes.SHA512()
+            else:
+                raise ValueError(f"unsupported ECDSA signature algorithm OID {sa_oid}")
+            pub.verify(sig, to_sign, ec.ECDSA(ha))
+        else:
+            raise ValueError("unsupported public key type in TSA signer certificate")
+    except InvalidSignature as e:
+        raise ValueError("CMS signature verification failed") from e
+    except AttributeError:
+        # Older cryptography: isinstance checks may differ
+        raise ValueError("unsupported public key type in TSA signer certificate") from None
+
+
+def _verify_rfc3161_token_b64(b64s: str, canonical_payload: bytes) -> None:
+    """Decode RFC 3161 TimeStampResp; check status, imprint vs canonical payload, CMS signature."""
+    import hashlib
+
+    try:
+        from asn1crypto import cms, tsp as tsp_mod
+    except ImportError as e:
+        raise ValueError(f"asn1crypto required for RFC 3161 TSA verification: {e}") from e
+
+    raw = base64.standard_b64decode(b64s)
+    resp = tsp_mod.TimeStampResp.load(raw)
+    st = resp["status"]["status"].native
+    if int(st) != 0:
+        raise ValueError(f"TSA status not granted (status={int(st)})")
+
+    tst_ci = resp["time_stamp_token"]
+    if tst_ci is None:
+        raise ValueError("missing time_stamp_token")
+
+    ci = tst_ci if isinstance(tst_ci, cms.ContentInfo) else cms.ContentInfo.load(tst_ci.dump())
+    signed_data = _cms_signed_data_from_content_info(ci)
+    tst_info = _cms_extract_tst_info(signed_data)
+
+    mi = tst_info["message_imprint"]
+    ha_oid = mi["hash_algorithm"]["algorithm"].dotted
+    hname = _tsa_imprint_oid_to_hash_name(ha_oid)
+    digest = hashlib.new(hname, canonical_payload).digest()
+    if digest != mi["hashed_message"].native:
+        raise ValueError("TSA message imprint does not match canonical attestation payload")
+
+    signer_infos = signed_data["signer_infos"]
+    if len(signer_infos) == 0:
+        raise ValueError("no signer_infos in timestamp token")
+    certs = _cms_certificates(signed_data)
+    if not certs:
+        raise ValueError("no certificates in timestamp token")
+    signer_cert = _cms_match_signer_cert(signer_infos[0], certs)
+    _cms_verify_signer_info(signer_infos[0], signer_cert, signed_data)
+
+
+def _verify_tsa(parsed: dict, canonical_payload_bytes: bytes) -> tuple[bool, str]:
+    """Verify TSA when --verify-tsa: RFC 3161 token or legacy Ed25519 predicate.tsa; fail-closed if neither."""
+    rfc = parsed.get("rfc3161_token_b64")
+    if isinstance(rfc, str) and rfc.strip():
+        try:
+            _verify_rfc3161_token_b64(rfc.strip(), canonical_payload_bytes)
+            return True, "tsa_rfc3161_verified"
+        except Exception as e:
+            return False, f"{_ERR_TSA_INVALID} {e}"
+
+    tsa = parsed.get("tsa")
+    if isinstance(tsa, dict):
+        payload = tsa.get("payload")
+        public_key_hex = str(tsa.get("public_key_hex", "")).lower()
+        signature_hex = str(tsa.get("signature_hex", "")).lower()
+        if payload is not None and len(public_key_hex) == 64 and len(signature_hex) == 128:
+            try:
+                _verify_ed25519_f33(public_key_hex, signature_hex, str(payload).encode("utf-8"))
+                return True, "tsa_legacy_ed25519_verified"
+            except Exception as e:
+                return False, f"{_ERR_TSA_INVALID} {e}"
+
+    return False, f"{_ERR_TSA_INVALID} --verify-tsa requires predicate.tsa.rfc3161_token_b64 or legacy Ed25519 tsa fields"
 
 
 def _verify_manifest_ed25519_signature(
@@ -314,7 +504,7 @@ def verify_sidecar_f33(sidecar_path: str, target_dir: str | None = None, verify_
     except Exception as e:
         return False, f"{_ERR_BAD_SIGNATURE} {e}"
     if verify_tsa:
-        tsa_ok, tsa_msg = _verify_tsa(parsed)
+        tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
         if not tsa_ok:
             return False, tsa_msg
     computed = hash_file_range(
@@ -347,7 +537,6 @@ def _log_output(target: str, computed_hash: str, status: str) -> None:
     print(f"[SHA-256]   : {computed_hash}", file=sys.stderr)
     print(f"[STATUS]    : {_ansi_status(status)}", file=sys.stderr)
     print(f"[NOTICE]    : {_CTA}", file=sys.stderr)
-    _print_compliance_notice()
 
 
 def hash_file_range(file_path: str, byte_start: int = 0, byte_end: int | None = None) -> str:
@@ -392,6 +581,7 @@ def verify_directory_from_manifest(
     progress_event_callback: Callable[[dict], None] | None = None,
     strip_mount_prefix: str = "",
     verify_tsa: bool = False,
+    max_workers: Optional[int] = None,
 ) -> dict:
     """
     Verify a directory tree against a manifest.
@@ -518,7 +708,7 @@ def verify_directory_from_manifest(
             except Exception as e:
                 return ("bad_signature", work_key, rel, algo, expected, None, f"{_ERR_BAD_SIGNATURE} {e}")
             if verify_tsa:
-                tsa_ok, tsa_msg = _verify_tsa(parsed)
+                tsa_ok, tsa_msg = _verify_tsa(parsed, payload)
                 if not tsa_ok:
                     return ("tsa_invalid", work_key, rel, algo, expected, None, tsa_msg)
             sidecar_digest = str(parsed["sha256"]).lower()
@@ -589,7 +779,7 @@ def verify_directory_from_manifest(
             return ("seal_broken", work_key, rel, algo, expected, computed.lower(), _ERR_DATA_DRIFT)
         return ("ok", work_key, rel, algo, expected, None, None)
 
-    executor = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
+    executor = ThreadPoolExecutor(max_workers=_effective_worker_count(max_workers))
     try:
         for kind, wk, rel, algo, expected, computed, err in executor.map(
             _hash_worker, _work_generator()
@@ -724,6 +914,7 @@ def execute_verification(
     progress_event_callback: Callable[[dict], None] | None = None,
     strip_mount_prefix: str = "",
     verify_tsa: bool = False,
+    max_workers: Optional[int] = None,
 ) -> VerificationReport:
     """
     Library entry point: verify directory against manifest.
@@ -742,6 +933,7 @@ def execute_verification(
         progress_event_callback=progress_event_callback,
         strip_mount_prefix=strip_mount_prefix,
         verify_tsa=verify_tsa,
+        max_workers=max_workers,
     )
     return VerificationReport(
         modified=result["modified"],
@@ -776,6 +968,7 @@ def execute_verification_single(
 
 
 def main() -> int:
+    _print_compliance_notice()
     parser = argparse.ArgumentParser(
         description="Verify attested data segment (Data Provenance Kit)"
     )
@@ -863,6 +1056,12 @@ def main() -> int:
         help="Verify optional TSA signature block when present in JSON .f33 sidecars.",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Thread pool size for --mode manifest (default: auto; capped at 64).",
+    )
+    parser.add_argument(
         "--emit-report",
         action="store_true",
         help="Emit a one-line executive summary report.",
@@ -887,6 +1086,12 @@ def main() -> int:
     if os.environ.get("FORS33_EXCLUDE_DIR"):
         dirs = [d.strip() for d in os.environ["FORS33_EXCLUDE_DIR"].split(",") if d.strip()]
         args.exclude_dir = list(args.exclude_dir or []) + dirs
+    if os.environ.get("FORS33_WORKERS"):
+        try:
+            args.workers = int(os.environ["FORS33_WORKERS"].strip())
+        except ValueError:
+            print("[ERROR] FORS33_WORKERS must be an integer.", file=sys.stderr)
+            return EXIT_USAGE
 
     target_dir = getattr(args, "root_dir", None) or getattr(args, "target_dir_deprecated", None)
 
@@ -917,7 +1122,6 @@ def main() -> int:
         print(f"[SIDECAR]   : {target_label}", file=sys.stderr)
         print(f"[STATUS]    : {msg}", file=sys.stderr)
         print(f"[NOTICE]    : {_CTA}", file=sys.stderr)
-        _print_compliance_notice()
         return EXIT_OK if (ok or args.warn_only) else EXIT_DRIFT
 
     if args.mode == "manifest":
@@ -957,6 +1161,7 @@ def main() -> int:
                 progress_event_callback=None,
                 strip_mount_prefix=args.strip_mount_prefix or "",
                 verify_tsa=args.verify_tsa,
+                max_workers=args.workers,
             )
             result = {
                 "schema_version": report.schema_version,
