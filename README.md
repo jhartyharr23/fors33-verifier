@@ -17,7 +17,7 @@ Standalone verification for attested data segments and general-purpose file inte
 pip install fors33-verifier
 ```
 
-Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images.
+Releases are published to PyPI manually using `python -m build` and `twine upload`; the GitHub Actions workflow `publish-fors33-verifier` is responsible **only** for building and pushing Docker images. That workflow runs **only** when you trigger **`workflow_dispatch`** with explicit **`version`** (no leading `v`, e.g. `0.5.0`) and **`push_latest`**—it does **not** run automatically on git tags.
 
 ## Usage
 

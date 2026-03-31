@@ -15,6 +15,7 @@ All notable changes to fors33-verifier are documented here.
 ### Changed
 
 - Startup compliance copy aligned with reference verifier notice lines.
+- **`publish-fors33-verifier`**: Docker publish is **manual `workflow_dispatch` only**, with required **`version`** and **`push_latest`** inputs (same model as `fors33-scanner`); automatic runs on git tag push were removed.
 
 ## [0.4.0] - 2026-03-24
 
